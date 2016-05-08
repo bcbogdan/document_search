@@ -1,56 +1,113 @@
 from __future__ import print_function
-import sys
-import mmh3
-from search import BooleanSearch
+from word_parser import WordParser
 
-REVERSE_INDEX_FILE = 'docs/reverse.txt'
-DOCUMENTS_DICT = 'docs/documentIds.txt'
-DEFAULT_QUERY = ['document',  'AND', 'overview', 'NOT', 'unit', 'OR', 'secret', 'AND', 'handle']
+SPECIAL_WORDS = 'specialwords.txt'
 
 
-def get_word_id(word):
+class BooleanSearch(object):
     """
-    Hashing method
+    Boolean Search class
+    Parses the input query and looks for the result files
     """
-    return mmh3.hash(word)
+    def __init__(self, operators=None):
+        """
+        Constructor
+        Sets the operators based on users preferences
+        Sets the parser for word normalization
+        """
+        if operators:
+            self.operators = operators
+        else:
+            self.operators = {
+                'AND': 'and',
+                'OR': 'or',
+                'NOT': 'not'
+            }
+        # Normalizing middleware - really slow during tests
+        self.parser = WordParser(SPECIAL_WORDS)
+        self.searched_expressions = []
 
+    def get_file_list(self, word_map, input_query, hasher, normalize=False):
+        """
+        The method returns lists of (file_list, to_find) tuples
+        each tuple matching a searched word
+        """
+        file_collection = []
+        for word, to_find in input_query:
+            if normalize:
+                word_id = str(
+                    hasher(self.parser(word))
+                )
+            else:
+                word_id = str(
+                    hasher(word)
+                )
+            if word_id in word_map.keys():
+                file_collection.append(
+                    (word_map[word_id], to_find)
+                )
+            else:
+                file_collection.append(
+                    ([], to_find)
+                )
 
-def create_map(file_path, dict_type):
-    """
-    Create a dictionary based on type
-    - index (reverse or direct)
-    - dict (word/doc - word_id/doc_id)
-    """
-    result_map = {}
-    temp_word_id = 'id'
-    with open(file_path, 'r') as input_file:
-        for line in input_file:
-            line_array = line.strip().split(' ')
-            if dict_type == 'index':
-                if len(line_array) == 1:
-                    temp_word_id = line_array[0]
-                    result_map[temp_word_id] = []
+        return file_collection
+
+    def parse_input(self, input_query):
+        """
+        The input is parsed and the result is
+        a list of lists - also indicating the priority of the boolean operators
+         AND=NOT>OR
+         each of the inner lists contain (word, negated) tuples to mark the NOT operator
+        """
+        query_list = []
+        boolean_operator = ''
+        for token in input_query:
+            if token.lower() not in self.operators.values():
+                if boolean_operator == self.operators['NOT']:
+                    negated = True
                 else:
-                    result_map[temp_word_id].append(
-                        line_array[0]
-                    )
-            elif dict_type == 'dict':
-                result_map[line_array[1]] = line_array[0]
+                    negated = False
+                query_list.append((token, negated))
+            elif token.lower() == self.operators['OR']:
+                boolean_operator = token.lower()
+                self.searched_expressions.append(query_list)
+                query_list = []
+            else:
+                boolean_operator = token.lower()
+        self.searched_expressions.append(query_list)
 
-    return result_map
+    @staticmethod
+    def evaluate_collection(collection):
+        """
+        Based on the file lists the method intersects or subtracts sets
+        Reuniune pentru OR !!!!
+        """
+        result = set(collection[0][0])
 
-if __name__ == '__main__':
-    word_map = create_map(REVERSE_INDEX_FILE, 'index')
-    documents_dict = create_map(DOCUMENTS_DICT, 'dict')
+        for file_list, negated in collection[1:]:
+            if negated:
+                result = result - set(file_list)
+            else:
+                result = result.intersection(set(file_list))
 
-    search = BooleanSearch()
-    if len(sys.argv) == 1:
-        query = DEFAULT_QUERY
-    else:
-        query = sys.argv[1:]
+        return result
 
-    doc_id_sets = search(query, word_map, get_word_id)
+    def __call__(self, search_query, word_map, hasher=None):
+        self.parse_input(search_query)
+        doc_id_list = []
 
-    for doc_id_set in doc_id_sets:
-        for doc_id in doc_id_set:
-            print(documents_dict[doc_id])
+        for expression in self.searched_expressions:
+            doc_id_list.append(
+                self.evaluate_collection(
+                    self.get_file_list(word_map, expression, hasher, True)
+                )
+            )
+
+        # Union between all lists - OR
+        union = doc_id_list[0]
+        for item in doc_id_list[1:]:
+            union = union.union(item)
+
+        return union
+
